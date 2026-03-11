@@ -1,4 +1,5 @@
 #include "common.h"
+#include "config.h"
 #include "sensor.h"
 #include "protocol.h"
 #include "socket_utils.h"
@@ -22,17 +23,23 @@ static void handle_signal(int sig) {
 }
 
 int main(void) {
-    DeviceConfig config = {
-        "BAT_001",
-        "127.0.0.1",
-        8080,
-        3
-    };
 
+    DeviceConfig config;
     int sockfd;
     char message[MAX_MESSAGE_LEN];
 
     signal(SIGINT, handle_signal);
+
+    if (load_device_config("config/device.conf", &config) != 0) {
+        fprintf(stderr, "Failed to load configuration\n");
+        return 1;
+    }
+
+    printf("Loaded configuration:\n");
+    printf("  device_id: %s\n", config.device_id);
+    printf("  server_ip: %s\n", config.server_ip);
+    printf("  server_port: %d\n", config.server_port);
+    printf("  interval: %d seconds\n\n", config.interval_sec);
 
     init_sensor_state();
 
@@ -43,12 +50,10 @@ int main(void) {
         return 1;
     }
 
-    printf("Device %s connected to %s:%d\n",
-           config.device_id,
-           config.server_ip,
-           config.server_port);
+    printf("Device connected to server\n\n");
 
     while (running) {
+
         TelemetryData data;
 
         generate_telemetry(config.device_id, &data);
@@ -59,17 +64,19 @@ int main(void) {
         }
 
         if (send_message(sockfd, message) != 0) {
-            fprintf(stderr, "Failed to send telemetry message\n");
+            fprintf(stderr, "Failed to send telemetry\n");
             break;
         }
 
         printf("Sent: %s\n", message);
+
         sleep_seconds(config.interval_sec);
     }
 
     close_socket(sockfd);
     cleanup_winsock();
 
-    printf("Device stopped.\n");
+    printf("Device stopped\n");
+
     return 0;
 }
