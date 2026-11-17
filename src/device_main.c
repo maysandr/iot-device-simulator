@@ -6,77 +6,47 @@
 
 #include <signal.h>
 #include <stdio.h>
-
 #ifdef _WIN32
 #include <windows.h>
-#define sleep_seconds(x) Sleep((x) * 1000)
+#define sleep_seconds(x) Sleep((DWORD)(x) * 1000u)
 #else
 #include <unistd.h>
-#define sleep_seconds(x) sleep(x)
+#define sleep_seconds(x) sleep((unsigned)(x))
 #endif
 
-static volatile int running = 1;
-
-static void handle_signal(int sig) {
-    (void)sig;
-    running = 0;
-}
+static volatile sig_atomic_t running = 1;
+static void handle_signal(int sig) { (void)sig; running = 0; }
 
 int main(void) {
-
-    DeviceConfig config;
-    int sockfd;
-    char message[MAX_MESSAGE_LEN];
-
     signal(SIGINT, handle_signal);
-
-    if (load_device_config("config/device.conf", &config) != 0) {
-        fprintf(stderr, "Failed to load configuration\n");
+    DeviceConfig config;
+    char message[MAX_MESSAGE_LEN];
+    if (load_device_config(DEFAULT_CONFIG_PATH, &config) != 0) {
+        fprintf(stderr, "Invalid or missing configuration: %s\n", DEFAULT_CONFIG_PATH);
         return 1;
     }
-
-    printf("Loaded configuration:\n");
-    printf("  device_id: %s\n", config.device_id);
-    printf("  server_ip: %s\n", config.server_ip);
-    printf("  server_port: %d\n", config.server_port);
-    printf("  interval: %d seconds\n\n", config.interval_sec);
-
+    printf("Device %s connecting to %s:%d every %d seconds\n",
+           config.device_id, config.server_ip, config.server_port, config.interval_sec);
     init_sensor_state();
-
-    sockfd = create_client_socket(config.server_ip, config.server_port);
-    if (sockfd < 0) {
+    socket_handle_t sockfd = create_client_socket(config.server_ip, config.server_port);
+    if (sockfd == INVALID_SOCKET_HANDLE) {
         fprintf(stderr, "Failed to connect to server\n");
-        cleanup_winsock();
-        return 1;
+        cleanup_sockets(); return 1;
     }
-
-    printf("Device connected to server\n\n");
-
+    puts("Device connected");
     while (running) {
-
         TelemetryData data;
-
         generate_telemetry(config.device_id, &data);
-
-        if (build_telemetry_message(&data, message, sizeof(message)) < 0) {
-            fprintf(stderr, "Failed to build telemetry message\n");
+        if (build_telemetry_message(&data, message, sizeof(message)) < 0 ||
+            send_message(sockfd, message) != 0) {
+            fputs("Failed to prepare or transmit telemetry\n", stderr);
             break;
         }
-
-        if (send_message(sockfd, message) != 0) {
-            fprintf(stderr, "Failed to send telemetry\n");
-            break;
-        }
-
         printf("Sent: %s\n", message);
-
         sleep_seconds(config.interval_sec);
     }
-
     close_socket(sockfd);
-    cleanup_winsock();
-
-    printf("Device stopped\n");
-
+    cleanup_sockets();
+    puts("Device stopped");
     return 0;
 }

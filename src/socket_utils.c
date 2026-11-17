@@ -1,161 +1,131 @@
 #include "socket_utils.h"
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <stdio.h>
 #include <string.h>
 
-static int winsock_initialized = 0;
-
-static int initialize_winsock(void) {
+#ifdef _WIN32
+#include <ws2tcpip.h>
+static int sockets_initialized = 0;
+static int initialize_sockets(void) {
+    if (sockets_initialized) return 0;
     WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return -1;
+    sockets_initialized = 1;
+    return 0;
+}
+#define socket_close closesocket
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <errno.h>
+static int initialize_sockets(void) { return 0; }
+#define socket_close close
+#endif
 
-    if (winsock_initialized) {
-        return 0;
+#ifdef _WIN32
+typedef int address_len_t;
+#else
+typedef socklen_t address_len_t;
+#endif
+
+static int socket_failed(socket_handle_t sock) {
+    return sock == INVALID_SOCKET_HANDLE;
+}
+
+socket_handle_t create_client_socket(const char *server_ip, int port) {
+    if (server_ip == NULL || port < 1 || port > 65535 || initialize_sockets() != 0)
+        return INVALID_SOCKET_HANDLE;
+    socket_handle_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (socket_failed(sock)) return INVALID_SOCKET_HANDLE;
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((unsigned short)port);
+    if (inet_pton(AF_INET, server_ip, &addr.sin_addr) != 1 ||
+        connect(sock, (struct sockaddr *)&addr, (address_len_t)sizeof(addr)) != 0) {
+        socket_close(sock);
+        return INVALID_SOCKET_HANDLE;
     }
+    return sock;
+}
 
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        printf("WSAStartup failed\n");
-        return -1;
+socket_handle_t create_server_socket(int port) {
+    if (port < 1 || port > 65535 || initialize_sockets() != 0)
+        return INVALID_SOCKET_HANDLE;
+    socket_handle_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (socket_failed(sock)) return INVALID_SOCKET_HANDLE;
+
+    int reuse = 1;
+#ifdef _WIN32
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse)) != 0)
+#else
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) != 0)
+#endif
+    { socket_close(sock); return INVALID_SOCKET_HANDLE; }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons((unsigned short)port);
+    if (bind(sock, (struct sockaddr *)&addr, (address_len_t)sizeof(addr)) != 0 ||
+        listen(sock, 5) != 0) {
+        socket_close(sock);
+        return INVALID_SOCKET_HANDLE;
     }
+    return sock;
+}
 
-    winsock_initialized = 1;
+socket_handle_t accept_client(socket_handle_t server_fd) {
+    return accept(server_fd, NULL, NULL);
+}
+
+static int send_all(socket_handle_t sock, const char *bytes, size_t length) {
+    size_t sent_total = 0;
+    while (sent_total < length) {
+        int sent = send(sock, bytes + sent_total, (int)(length - sent_total), 0);
+        if (sent <= 0) return -1;
+        sent_total += (size_t)sent;
+    }
     return 0;
 }
 
-int create_client_socket(const char *server_ip, int port) {
-    SOCKET sockfd;
-    struct sockaddr_in server_addr;
-
-    if (initialize_winsock() != 0) {
-        return -1;
-    }
-
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == INVALID_SOCKET) {
-        printf("socket creation failed\n");
-        return -1;
-    }
-
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons((unsigned short)port);
-
-    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
-        printf("inet_pton failed\n");
-        closesocket(sockfd);
-        return -1;
-    }
-
-    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        printf("connect failed\n");
-        closesocket(sockfd);
-        return -1;
-    }
-
-    return (int)sockfd;
+int send_message(socket_handle_t sock, const char *message) {
+    if (message == NULL || strchr(message, '\n') != NULL) return -1;
+    size_t len = strlen(message);
+    if (send_all(sock, message, len) != 0) return -1;
+    return send_all(sock, "\n", 1);
 }
 
-int create_server_socket(int port) {
-    SOCKET sockfd;
-    struct sockaddr_in server_addr;
-    char opt = 1;
-
-    if (initialize_winsock() != 0) {
-        return -1;
-    }
-
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == INVALID_SOCKET) {
-        printf("socket creation failed\n");
-        return -1;
-    }
-
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == SOCKET_ERROR) {
-        printf("setsockopt failed\n");
-        closesocket(sockfd);
-        return -1;
-    }
-
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons((unsigned short)port);
-
-    if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        printf("bind failed\n");
-        closesocket(sockfd);
-        return -1;
-    }
-
-    if (listen(sockfd, 5) == SOCKET_ERROR) {
-        printf("listen failed\n");
-        closesocket(sockfd);
-        return -1;
-    }
-
-    return (int)sockfd;
-}
-
-int accept_client(int server_fd) {
-    SOCKET client_fd;
-
-    client_fd = accept((SOCKET)server_fd, NULL, NULL);
-    if (client_fd == INVALID_SOCKET) {
-        printf("accept failed\n");
-        return -1;
-    }
-
-    return (int)client_fd;
-}
-
-int send_message(int sockfd, const char *message) {
-    size_t len;
-    int sent;
-
-    len = strlen(message);
-    sent = send((SOCKET)sockfd, message, (int)len, 0);
-
-    if (sent == SOCKET_ERROR) {
-        printf("send failed\n");
-        return -1;
-    }
-
-    if (sent != (int)len) {
-        printf("partial send occurred\n");
-        return -1;
-    }
-
-    return 0;
-}
-
-int receive_message(int sockfd, char *buffer, size_t buffer_size) {
-    int received;
-
-    received = recv((SOCKET)sockfd, buffer, (int)(buffer_size - 1), 0);
-
-    if (received == SOCKET_ERROR) {
-        printf("recv failed\n");
-        return -1;
-    }
-
-    if (received == 0) {
-        return 0;
-    }
-
-    buffer[received] = '\0';
-    return received;
-}
-
-void close_socket(int sockfd) {
-    if (sockfd >= 0) {
-        closesocket((SOCKET)sockfd);
+int receive_message(socket_handle_t sock, char *buffer, size_t buffer_size) {
+    if (buffer == NULL || buffer_size < 2) return -1;
+    size_t used = 0;
+    int overlong = 0;
+    for (;;) {
+        char c;
+        int got = recv(sock, &c, 1, 0);
+        if (got < 0) return -1;
+        if (got == 0) return used == 0 && !overlong ? 0 : -1;
+        if (c == '\n') {
+            if (overlong || used == 0) return -1;
+            if (buffer[used - 1] == '\r') --used;
+            if (used == 0) return -1;
+            buffer[used] = '\0';
+            return (int)used;
+        }
+        if (used < buffer_size - 1 && !overlong) buffer[used++] = c;
+        else overlong = 1; /* Consume to newline to preserve stream alignment. */
     }
 }
 
-void cleanup_winsock(void) {
-    if (winsock_initialized) {
-        WSACleanup();
-        winsock_initialized = 0;
-    }
+void close_socket(socket_handle_t sock) {
+    if (!socket_failed(sock)) socket_close(sock);
+}
+
+void cleanup_sockets(void) {
+#ifdef _WIN32
+    if (sockets_initialized) { WSACleanup(); sockets_initialized = 0; }
+#endif
 }

@@ -1,45 +1,59 @@
 #include "config.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
-static void trim_newline(char *str) {
-    size_t len = strlen(str);
-
-    if (len > 0 && (str[len - 1] == '\n' || str[len - 1] == '\r')) {
-        str[len - 1] = '\0';
-    }
+static int parse_int(const char *text, int min, int max, int *out) {
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || v < min || v > max) return -1;
+    *out = (int)v;
+    return 0;
 }
 
 int load_device_config(const char *filename, DeviceConfig *config) {
+    if (filename == NULL || config == NULL) return -1;
+    FILE *file = fopen(filename, "r");
+    if (file == NULL) return -1;
 
-    FILE *file;
+    memset(config, 0, sizeof(*config));
     char line[MAX_LINE_LEN];
-
-    file = fopen(filename, "r");
-    if (!file) {
-        printf("Failed to open config file: %s\n", filename);
-        return -1;
+    unsigned flags = 0;
+    while (fgets(line, sizeof(line), file) != NULL) {
+        size_t length = strlen(line);
+        if (length > 0 && line[length - 1] != '\n' && !feof(file)) {
+            fclose(file); return -1; /* line too long */
+        }
+        line[strcspn(line, "\r\n")] = '\0';
+        if (line[0] == '#' || line[0] == '\0') continue;
+        char *equals = strchr(line, '=');
+        if (equals == NULL) { fclose(file); return -1; }
+        *equals++ = '\0';
+        if (strcmp(line, "device_id") == 0) {
+            if (strlen(equals) == 0 || strlen(equals) >= sizeof(config->device_id)) {
+                fclose(file); return -1;
+            }
+            strcpy(config->device_id, equals); flags |= 1u;
+        } else if (strcmp(line, "server_ip") == 0) {
+            if (strlen(equals) == 0 || strlen(equals) >= sizeof(config->server_ip)) {
+                fclose(file); return -1;
+            }
+            strcpy(config->server_ip, equals); flags |= 2u;
+        } else if (strcmp(line, "server_port") == 0) {
+            if (parse_int(equals, 1, 65535, &config->server_port) != 0) {
+                fclose(file); return -1;
+            }
+            flags |= 4u;
+        } else if (strcmp(line, "interval_sec") == 0) {
+            if (parse_int(equals, 1, 3600, &config->interval_sec) != 0) {
+                fclose(file); return -1;
+            }
+            flags |= 8u;
+        } else { fclose(file); return -1; }
     }
-
-    while (fgets(line, sizeof(line), file)) {
-
-        trim_newline(line);
-
-        if (strncmp(line, "device_id=", 10) == 0) {
-            strncpy(config->device_id, line + 10, sizeof(config->device_id) - 1);
-        }
-        else if (strncmp(line, "server_ip=", 10) == 0) {
-            strncpy(config->server_ip, line + 10, sizeof(config->server_ip) - 1);
-        }
-        else if (strncmp(line, "server_port=", 12) == 0) {
-            config->server_port = atoi(line + 12);
-        }
-        else if (strncmp(line, "interval_sec=", 13) == 0) {
-            config->interval_sec = atoi(line + 13);
-        }
-    }
-
     fclose(file);
-    return 0;
+    return flags == 15u ? 0 : -1;
 }

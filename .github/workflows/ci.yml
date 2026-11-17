@@ -1,0 +1,12 @@
+name: Telemetry simulator tests
+on:
+  push:
+  pull_request:
+jobs:
+  linux-build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make all
+      - run: make test
+      - run: make integration-test

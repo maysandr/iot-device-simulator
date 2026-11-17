@@ -8,7 +8,6 @@
 
 #define MAX_MESSAGE_LEN 256
 #define MAX_LINE_LEN 256
-
 #define DEFAULT_CONFIG_PATH "config/device.conf"
 #define DEFAULT_LOG_PATH "logs/server.log"
 
